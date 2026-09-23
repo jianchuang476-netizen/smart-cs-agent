@@ -1,0 +1,236 @@
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: smart_cs
+      MYSQL_USER: smart_cs
+      MYSQL_PASSWORD: smart_cs
+      MYSQL_ROOT_PASSWORD: root
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: smart_checkpoints
+      POSTGRES_USER: smart_cs
+      POSTGRES_PASSWORD: smart_cs
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U smart_cs -d smart_checkpoints"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  chroma:
+    image: chromadb/chroma:1.5.9
+    ports:
+      - "8001:8000"
+    volumes:
+      - chroma_data:/data
+
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+      - "8002:8000"
+    environment:
+      APP_ENV: development
+      APP_DEBUG: "true"
+      JWT_SECRET_KEY: local-development-secret-change-me
+      DATABASE_URL: mysql+asyncmy://smart_cs:smart_cs@mysql:3306/smart_cs
+      CHECKPOINT_BACKEND: postgres
+      CHECKPOINT_DATABASE_URL: postgresql://smart_cs:smart_cs@postgres:5432/smart_checkpoints
+      REDIS_URL: redis://redis:6379/0
+      CHROMA_HOST: chroma
+      CHROMA_PORT: "8000"
+      LLM_PROVIDER: ${LLM_PROVIDER:-deepseek}
+      LLM_MODEL: ${LLM_MODEL:-deepseek-chat}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.deepseek.com}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
+      EMBEDDING_MODEL: /app/data/models/bge-small-zh-v1.5
+      RERANKER_ENABLED: "false"
+      HF_ENDPOINT: https://hf-mirror.com
+      HF_HUB_DISABLE_XET: "1"
+      SENTENCE_TRANSFORMERS_HOME: /app/data/models
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-http://langfuse:3000}
+      NOTIFICATION_PROVIDER: ${NOTIFICATION_PROVIDER:-mock}
+      DINGTALK_WEBHOOK: ${DINGTALK_WEBHOOK:-}
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      mysql:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      chroma:
+        condition: service_started
+
+  worker:
+    build: .
+    command: celery -A app.worker.celery_app.celery_app worker --loglevel=info --pool=solo
+    environment:
+      APP_ENV: development
+      DATABASE_URL: mysql+asyncmy://smart_cs:smart_cs@mysql:3306/smart_cs
+      CHECKPOINT_BACKEND: memory
+      REDIS_URL: redis://redis:6379/0
+      CHROMA_HOST: chroma
+      CHROMA_PORT: "8000"
+      LLM_PROVIDER: ${LLM_PROVIDER:-deepseek}
+      LLM_MODEL: ${LLM_MODEL:-deepseek-chat}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.deepseek.com}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
+      EMBEDDING_MODEL: /app/data/models/bge-small-zh-v1.5
+      RERANKER_ENABLED: "false"
+      HF_ENDPOINT: https://hf-mirror.com
+      HF_HUB_DISABLE_XET: "1"
+      SENTENCE_TRANSFORMERS_HOME: /app/data/models
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      chroma:
+        condition: service_started
+
+  bootstrap:
+    image: smart-cs-agent-api:latest
+    build: .
+    profiles: ["tools"]
+    command: python -m scripts.bootstrap
+    environment:
+      DATABASE_URL: mysql+asyncmy://smart_cs:smart_cs@mysql:3306/smart_cs
+      CHECKPOINT_BACKEND: memory
+      REDIS_URL: redis://redis:6379/0
+      CHROMA_HOST: chroma
+      CHROMA_PORT: "8000"
+      AUTO_CREATE_TABLES: "true"
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
+      EMBEDDING_MODEL: /app/data/models/bge-small-zh-v1.5
+      RERANKER_ENABLED: "false"
+      HF_ENDPOINT: https://hf-mirror.com
+      HF_HUB_DISABLE_XET: "1"
+      SENTENCE_TRANSFORMERS_HOME: /app/data/models
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      chroma:
+        condition: service_started
+
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      - api
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    profiles: ["observability"]
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./config/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+
+  grafana:
+    image: grafana/grafana:12.1.0
+    profiles: ["observability"]
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./config/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+
+  langfuse-postgres:
+    image: postgres:16-alpine
+    profiles: ["observability"]
+    environment:
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: langfuse
+      POSTGRES_DB: langfuse
+    volumes:
+      - langfuse_postgres_data:/var/lib/postgresql/data
+
+  langfuse-clickhouse:
+    image: clickhouse/clickhouse-server:25.3
+    profiles: ["observability"]
+    environment:
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: clickhouse
+      CLICKHOUSE_DB: default
+    volumes:
+      - langfuse_clickhouse_data:/var/lib/clickhouse
+
+  langfuse-redis:
+    image: redis:7-alpine
+    profiles: ["observability"]
+    command: redis-server --requirepass langfuse
+
+  langfuse:
+    image: langfuse/langfuse:3
+    profiles: ["observability"]
+    ports:
+      - "3001:3000"
+    environment:
+      DATABASE_URL: postgresql://langfuse:langfuse@langfuse-postgres:5432/langfuse
+      CLICKHOUSE_URL: http://langfuse-clickhouse:8123
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: clickhouse
+      REDIS_CONNECTION_STRING: redis://:langfuse@langfuse-redis:6379
+      NEXTAUTH_SECRET: local-langfuse-nextauth-secret
+      SALT: local-langfuse-salt
+      NEXTAUTH_URL: http://localhost:3001
+    depends_on:
+      - langfuse-postgres
+      - langfuse-clickhouse
+      - langfuse-redis
+
+volumes:
+  mysql_data:
+  postgres_data:
+  redis_data:
+  chroma_data:
+  grafana_data:
+  langfuse_postgres_data:
+  langfuse_clickhouse_data:

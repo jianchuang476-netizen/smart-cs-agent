@@ -1,0 +1,46 @@
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-q"
+markers = [
+  "eval: requires a real model and external services",
+  "integration: requires containers or service-backed test databases",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "ASYNC", "S", "C4", "SIM"]
+ignore = ["S101", "B008", "S104", "S105", "S106", "UP042"]
+
+[tool.mypy]
+python_version = "3.12"
+plugins = ["pydantic.mypy"]
+strict = false
+check_untyped_defs = true
+ignore_missing_imports = true
+disable_error_code = ["import-untyped", "arg-type", "assignment", "union-attr", "name-defined"]
+exclude = [
+  "migrations",
+  "scripts",
+  "app/core/agent.py",
+  "app/services/vector_db.py",
+  "app/worker",
+  "app/api/endpoints.py",
+  "app/core/tools.py",
+  "app/services/mysql_db.py",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["app"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+
+[[tool.mypy.overrides]]
+module = ["app.core.agent", "app.services.vector_db"]
+ignore_errors = true
